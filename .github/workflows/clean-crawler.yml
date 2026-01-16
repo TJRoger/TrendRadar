@@ -8,6 +8,11 @@ name: Check In
 #   2. 每 7 天内至少运行一次 / Run at least once every 7 days
 
 on:
+schedule:
+   
+    #   "30 0-14 * * 5"  → 北京时间 8:00-22:00 每小时第30分钟 / Beijing 8am-10pm
+    #
+    - cron: "33 20 * * 5"
   workflow_dispatch:
 
 jobs:
