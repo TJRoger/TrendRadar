@@ -4,5 +4,9 @@
 """
 
 from trendradar.crawler.fetcher import DataFetcher
+from trendradar.crawler.shareholder_rewards import (
+    ShareholderRewardsConfig,
+    ShareholderRewardsFetcher,
+)
 
-__all__ = ["DataFetcher"]
+__all__ = ["DataFetcher", "ShareholderRewardsConfig", "ShareholderRewardsFetcher"]

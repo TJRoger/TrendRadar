@@ -116,6 +116,16 @@ class AppContext:
         return self.rss_config.get("FEEDS", [])
 
     @property
+    def shareholder_rewards_config(self) -> Dict:
+        """获取上市公司股东回馈活动配置"""
+        return self.config.get("SHAREHOLDER_REWARDS", {})
+
+    @property
+    def shareholder_rewards_enabled(self) -> bool:
+        """上市公司股东回馈活动抓取是否启用"""
+        return self.shareholder_rewards_config.get("ENABLED", False)
+
+    @property
     def display_mode(self) -> str:
         """获取显示模式 (keyword | platform)"""
         return self.config.get("DISPLAY_MODE", "keyword")

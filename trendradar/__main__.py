@@ -19,6 +19,7 @@ from trendradar.core import load_config
 from trendradar.core.analyzer import convert_keyword_stats_to_platform_stats
 from trendradar.crawler import DataFetcher
 from trendradar.storage import convert_crawl_results_to_news_data
+from trendradar.storage.base import RSSData
 from trendradar.utils.time import is_within_days
 
 
@@ -629,9 +630,39 @@ class NewsAnalyzer:
 
         return results, id_to_name, failed_ids
 
+    def _normalize_str_list(self, value) -> List[str]:
+        """将配置值标准化为字符串列表"""
+        if not value:
+            return []
+        if isinstance(value, str):
+            return [value.strip()] if value.strip() else []
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()]
+        return []
+
+    def _config_int(self, value, default: int) -> int:
+        """读取整型配置，格式异常时使用默认值"""
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _rss_notification_enabled(self) -> bool:
+        """是否启用 RSS 类内容的报告/通知统计"""
+        rss_enabled = self.ctx.rss_config.get("NOTIFICATION", {}).get("ENABLED", False)
+        shareholder_enabled = self.ctx.shareholder_rewards_config.get("NOTIFICATION", {}).get("ENABLED", False)
+        return rss_enabled or shareholder_enabled
+
+    def _rss_feed_notification_enabled(self, feed_id: str) -> bool:
+        """指定 RSS 类数据源是否参与报告/通知统计"""
+        rewards_cfg = self.ctx.shareholder_rewards_config
+        if feed_id == rewards_cfg.get("ID"):
+            return rewards_cfg.get("NOTIFICATION", {}).get("ENABLED", False)
+        return self.ctx.rss_config.get("NOTIFICATION", {}).get("ENABLED", False)
+
     def _crawl_rss_data(self) -> Tuple[Optional[List[Dict]], Optional[List[Dict]]]:
         """
-        执行 RSS 数据抓取
+        执行 RSS 类数据抓取，并统一保存普通 RSS 与股东回馈活动数据
 
         Returns:
             (rss_items, rss_new_items) 元组：
@@ -639,13 +670,36 @@ class NewsAnalyzer:
             - rss_new_items: 新增条目列表（用于新增区块）
             如果未启用或失败返回 (None, None)
         """
-        if not self.ctx.rss_enabled:
+        rss_data_sources = []
+
+        standard_rss_data = self._fetch_standard_rss_data()
+        if standard_rss_data:
+            rss_data_sources.append(standard_rss_data)
+
+        shareholder_rewards_data = self._fetch_shareholder_rewards_data()
+        if shareholder_rewards_data:
+            rss_data_sources.append(shareholder_rewards_data)
+
+        combined_rss_data = self._merge_rss_data(rss_data_sources)
+        if not combined_rss_data:
             return None, None
+
+        if self.storage_manager.save_rss_data(combined_rss_data):
+            print(f"[RSS] 数据已保存到存储后端")
+            return self._process_rss_data_by_mode(combined_rss_data)
+
+        print(f"[RSS] 数据保存失败")
+        return None, None
+
+    def _fetch_standard_rss_data(self) -> Optional[RSSData]:
+        """抓取配置中的普通 RSS 源，不直接保存"""
+        if not self.ctx.rss_enabled:
+            return None
 
         rss_feeds = self.ctx.rss_feeds
         if not rss_feeds:
             print("[RSS] 未配置任何 RSS 源")
-            return None, None
+            return None
 
         try:
             from trendradar.crawler.rss import RSSFetcher, RSSFeedConfig
@@ -681,7 +735,7 @@ class NewsAnalyzer:
 
             if not feeds:
                 print("[RSS] 没有启用的 RSS 源")
-                return None, None
+                return None
 
             # 创建抓取器
             rss_config = self.ctx.rss_config
@@ -705,26 +759,85 @@ class NewsAnalyzer:
                 default_max_age_days=default_max_age_days,
             )
 
-            # 抓取数据
-            rss_data = fetcher.fetch_all()
-
-            # 保存到存储后端
-            if self.storage_manager.save_rss_data(rss_data):
-                print(f"[RSS] 数据已保存到存储后端")
-
-                # 处理 RSS 数据（按模式过滤）并返回用于合并推送
-                return self._process_rss_data_by_mode(rss_data)
-            else:
-                print(f"[RSS] 数据保存失败")
-                return None, None
+            return fetcher.fetch_all()
 
         except ImportError as e:
             print(f"[RSS] 缺少依赖: {e}")
             print("[RSS] 请安装 feedparser: pip install feedparser")
-            return None, None
+            return None
         except Exception as e:
             print(f"[RSS] 抓取失败: {e}")
-            return None, None
+            return None
+
+    def _fetch_shareholder_rewards_data(self) -> Optional[RSSData]:
+        """抓取最新上市公司股东回馈活动公告，不直接保存"""
+        if not self.ctx.shareholder_rewards_enabled:
+            return None
+
+        try:
+            from trendradar.crawler import ShareholderRewardsConfig, ShareholderRewardsFetcher
+
+            cfg = self.ctx.shareholder_rewards_config
+            rewards_config = ShareholderRewardsConfig(
+                id=cfg.get("ID", "shareholder-rewards-cninfo"),
+                name=cfg.get("NAME", "上市公司股东回馈活动"),
+                enabled=cfg.get("ENABLED", True),
+                keywords=self._normalize_str_list(cfg.get("KEYWORDS")),
+                title_include_keywords=self._normalize_str_list(cfg.get("TITLE_INCLUDE_KEYWORDS")),
+                title_exclude_keywords=self._normalize_str_list(cfg.get("TITLE_EXCLUDE_KEYWORDS")),
+                max_items=self._config_int(cfg.get("MAX_ITEMS", 30), 30),
+                max_age_days=self._config_int(cfg.get("MAX_AGE_DAYS", 90), 90),
+                request_interval=self._config_int(cfg.get("REQUEST_INTERVAL", 800), 800),
+                timeout=self._config_int(cfg.get("TIMEOUT", 15), 15),
+                use_proxy=bool(cfg.get("USE_PROXY", False)),
+                proxy_url=cfg.get("PROXY_URL", "") or self.proxy_url or "",
+                timezone=self.ctx.config.get("TIMEZONE", "Asia/Shanghai"),
+                api_url=cfg.get("API_URL", "https://www.cninfo.com.cn/new/hisAnnouncement/query"),
+                detail_base_url=cfg.get("DETAIL_BASE_URL", "https://static.cninfo.com.cn/"),
+                column=cfg.get("COLUMN", "szse"),
+                page_size=self._config_int(cfg.get("PAGE_SIZE", 30), 30),
+            )
+
+            if not rewards_config.keywords:
+                print("[股东回馈] 未配置检索关键词")
+                return None
+
+            rewards_data = ShareholderRewardsFetcher(rewards_config).fetch_all()
+            if rewards_data.items or rewards_data.failed_ids:
+                return rewards_data
+            return None
+        except Exception as e:
+            print(f"[股东回馈] 抓取失败: {e}")
+            return None
+
+    def _merge_rss_data(self, rss_data_sources: List[RSSData]) -> Optional[RSSData]:
+        """合并多个 RSSData，保证同一次运行只写一条 RSS 抓取记录"""
+        rss_data_sources = [data for data in rss_data_sources if data]
+        if not rss_data_sources:
+            return None
+
+        merged_items = {}
+        merged_id_to_name = {}
+        merged_failed_ids = []
+
+        for data in rss_data_sources:
+            merged_id_to_name.update(data.id_to_name)
+            for feed_id, rss_items in data.items.items():
+                if feed_id not in merged_items:
+                    merged_items[feed_id] = []
+                merged_items[feed_id].extend(rss_items)
+            for failed_id in data.failed_ids:
+                if failed_id not in merged_failed_ids:
+                    merged_failed_ids.append(failed_id)
+
+        latest_data = rss_data_sources[-1]
+        return RSSData(
+            date=latest_data.date,
+            crawl_time=latest_data.crawl_time,
+            items=merged_items,
+            id_to_name=merged_id_to_name,
+            failed_ids=merged_failed_ids,
+        )
 
     def _process_rss_data_by_mode(self, rss_data) -> Tuple[Optional[List[Dict]], Optional[List[Dict]]]:
         """
@@ -745,11 +858,11 @@ class NewsAnalyzer:
         """
         from trendradar.core.analyzer import count_rss_frequency
 
-        rss_config = self.ctx.rss_config
-
         # 检查是否启用 RSS 通知
-        if not rss_config.get("NOTIFICATION", {}).get("ENABLED", False):
+        if not self._rss_notification_enabled():
             return None, None
+
+        rss_config = self.ctx.rss_config
 
         # 加载关键词配置
         try:
@@ -898,7 +1011,19 @@ class NewsAnalyzer:
                 except (ValueError, TypeError):
                     pass
 
+        rewards_cfg = self.ctx.shareholder_rewards_config
+        rewards_feed_id = rewards_cfg.get("ID")
+        rewards_max_age = rewards_cfg.get("MAX_AGE_DAYS")
+        if rewards_feed_id and rewards_max_age is not None:
+            try:
+                feed_max_age_map[rewards_feed_id] = int(rewards_max_age)
+            except (ValueError, TypeError):
+                pass
+
         for feed_id, items in items_dict.items():
+            if not self._rss_feed_notification_enabled(feed_id):
+                continue
+
             # 确定此 feed 的 max_age_days
             max_days = feed_max_age_map.get(feed_id)
             if max_days is None:

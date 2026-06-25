@@ -174,6 +174,47 @@ def _load_rss_config(config_data: Dict) -> Dict:
     }
 
 
+def _load_shareholder_rewards_config(config_data: Dict) -> Dict:
+    """加载上市公司股东回馈活动配置"""
+    rewards = config_data.get("shareholder_rewards", {})
+    advanced = config_data.get("advanced", {})
+    advanced_rewards = advanced.get("shareholder_rewards", {})
+    advanced_crawler = advanced.get("crawler", {})
+
+    enabled_env = _get_env_bool("SHAREHOLDER_REWARDS_ENABLED")
+
+    return {
+        "ENABLED": enabled_env if enabled_env is not None else rewards.get("enabled", True),
+        "ID": rewards.get("id", "shareholder-rewards-cninfo"),
+        "NAME": rewards.get("name", "上市公司股东回馈活动"),
+        "KEYWORDS": rewards.get("keywords", ["股东回馈", "回馈股东", "投资者回馈"]),
+        "TITLE_INCLUDE_KEYWORDS": rewards.get(
+            "title_include_keywords",
+            ["股东回馈", "回馈股东", "投资者回馈", "回馈投资者", "全体股东派送福利"],
+        ),
+        "TITLE_EXCLUDE_KEYWORDS": rewards.get("title_exclude_keywords", ["收购", "评估报告"]),
+        "MAX_ITEMS": rewards.get("max_items", 30),
+        "MAX_AGE_DAYS": rewards.get("max_age_days", 90),
+        "NOTIFICATION": {
+            "ENABLED": rewards.get("notification_enabled", True),
+        },
+        "REQUEST_INTERVAL": advanced_rewards.get("request_interval", 800),
+        "TIMEOUT": advanced_rewards.get("timeout", 15),
+        "USE_PROXY": advanced_rewards.get("use_proxy", False),
+        "PROXY_URL": advanced_rewards.get("proxy_url", "") or advanced_crawler.get("default_proxy", ""),
+        "API_URL": advanced_rewards.get(
+            "api_url",
+            "https://www.cninfo.com.cn/new/hisAnnouncement/query",
+        ),
+        "DETAIL_BASE_URL": advanced_rewards.get(
+            "detail_base_url",
+            "https://static.cninfo.com.cn/",
+        ),
+        "COLUMN": advanced_rewards.get("column", "szse"),
+        "PAGE_SIZE": advanced_rewards.get("page_size", 30),
+    }
+
+
 def _load_storage_config(config_data: Dict) -> Dict:
     """加载存储配置"""
     storage = config_data.get("storage", {})
@@ -381,6 +422,9 @@ def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
 
     # RSS 配置
     config["RSS"] = _load_rss_config(config_data)
+
+    # 上市公司股东回馈活动配置
+    config["SHAREHOLDER_REWARDS"] = _load_shareholder_rewards_config(config_data)
 
     # 存储配置
     config["STORAGE"] = _load_storage_config(config_data)

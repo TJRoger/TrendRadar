@@ -222,7 +222,7 @@
 - **RSS 订阅源支持**：新增 RSS/Atom 抓取，按关键词分组统计（与热榜格式一致）
 - **存储结构重构**：扁平化目录结构 `output/{type}/{date}.db`
 - **统一排序配置**：`sort_by_position_first` 同时影响热榜和 RSS
-- **配置结构重构**：`config.yaml` 重新组织为 7 个逻辑分组（app、report、notification、storage、platforms、rss、advanced），配置路径更清晰
+- **配置结构重构**：`config.yaml` 重新组织为 8 个逻辑分组（app、report、notification、storage、platforms、rss、shareholder_rewards、advanced），配置路径更清晰
 
 
 ### 2025/12/26 - mcp-v1.2.0
@@ -751,6 +751,15 @@ frequency_words.txt 文件增加了一个【必须词】功能，使用 + 号
 - **合并推送**：热榜和 RSS 合并为一条消息推送
 
 > 💡 RSS 使用与热榜相同的 `frequency_words.txt` 进行关键词过滤
+
+### **上市公司股东回馈活动汇总**
+
+系统内置从巨潮资讯公告检索最新上市公司股东回馈/投资者回馈活动，并汇总到 RSS 数据结果中：
+
+- **公告来源**：巨潮资讯公告全文检索
+- **默认范围**：最近 90 天，最多 30 条
+- **结果复用**：进入 HTML 报告、通知推送和 MCP RSS 查询
+- **配置位置**：`config/config.yaml` 的 `shareholder_rewards` 与 `advanced.shareholder_rewards`
 
 ### **智能推送策略**
 

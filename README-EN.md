@@ -173,7 +173,7 @@ After communication, the author indicated no concerns about server pressure, but
 - **RSS Feed Support**: Added RSS/Atom feed crawling, keyword-based grouping and statistics (consistent with trending format)
 - **Storage Structure Refactoring**: Flattened directory structure `output/{type}/{date}.db`
 - **Unified Sorting Config**: `sort_by_position_first` affects both trending and RSS
-- **Config Structure Refactoring**: `config.yaml` reorganized into 7 logical groups (app, report, notification, storage, platforms, rss, advanced) with clearer config paths
+- **Config Structure Refactoring**: `config.yaml` reorganized into 8 logical groups (app, report, notification, storage, platforms, rss, shareholder_rewards, advanced) with clearer config paths
 
 
 ### 2025/12/26 - mcp-v1.2.0
