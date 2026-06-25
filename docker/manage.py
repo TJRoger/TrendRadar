@@ -12,20 +12,10 @@ import signal
 from pathlib import Path
 
 # Web 服务器配置
-WEBSERVER_PORT = int(os.environ.get("WEBSERVER_PORT", "8080"))
+_raw_port = int(os.environ.get("WEBSERVER_PORT", "8080"))
+WEBSERVER_PORT = _raw_port if 1 <= _raw_port <= 65535 else 8080
 WEBSERVER_DIR = "/app/output"
 WEBSERVER_PID_FILE = "/tmp/webserver.pid"
-
-
-def run_command(cmd, shell=True, capture_output=True):
-    """执行系统命令"""
-    try:
-        result = subprocess.run(
-            cmd, shell=shell, capture_output=capture_output, text=True
-        )
-        return result.returncode == 0, result.stdout, result.stderr
-    except Exception as e:
-        return False, "", str(e)
 
 
 def manual_run():
@@ -132,10 +122,10 @@ def show_status():
     supercronic_is_pid1 = False
     pid1_cmdline = ""
     try:
-        with open('/proc/1/cmdline', 'r') as f:
-            pid1_cmdline = f.read().replace('\x00', ' ').strip()
+        with open('/proc/1/cmdline', 'rb') as f:
+            pid1_cmdline = f.read().replace(b'\x00', b' ').decode('utf-8', errors='ignore').strip()
         print(f"  🔍 PID 1 进程: {pid1_cmdline}")
-        
+
         if "supercronic" in pid1_cmdline.lower():
             print("  ✅ supercronic 正确运行为 PID 1")
             supercronic_is_pid1 = True
@@ -187,7 +177,7 @@ def show_status():
                     with open(file_path, 'r') as f:
                         crontab_content = f.read().strip()
                         print(f"         内容: {crontab_content}")
-                except:
+                except Exception:
                     pass
         else:
             print(f"    ❌ {description}: 不存在")
@@ -279,11 +269,6 @@ def show_config():
         "CRON_SCHEDULE",
         "RUN_MODE",
         "IMMEDIATE_RUN",
-        # 核心配置
-        "ENABLE_CRAWLER",
-        "ENABLE_NOTIFICATION",
-        "REPORT_MODE",
-        "DISPLAY_MODE",
         # 通知渠道
         "FEISHU_WEBHOOK_URL",
         "DINGTALK_WEBHOOK_URL",
@@ -296,6 +281,12 @@ def show_config():
         "NTFY_TOKEN",
         "BARK_URL",
         "SLACK_WEBHOOK_URL",
+        # AI 分析配置
+        "AI_ANALYSIS_ENABLED",
+        "AI_API_KEY",
+        "AI_PROVIDER",
+        "AI_MODEL",
+        "AI_BASE_URL",
         # 远程存储配置
         "S3_BUCKET_NAME",
         "S3_ACCESS_KEY_ID",
@@ -306,7 +297,7 @@ def show_config():
     for var in env_vars:
         value = os.environ.get(var, "未设置")
         # 隐藏敏感信息
-        if any(sensitive in var for sensitive in ["WEBHOOK", "TOKEN", "KEY", "SECRET"]):
+        if var == "BARK_URL" or any(sensitive in var for sensitive in ["WEBHOOK", "TOKEN", "KEY", "SECRET"]):
             if value and value != "未设置":
                 masked_value = value[:10] + "***" if len(value) > 10 else "***"
                 print(f"  {var}: {masked_value}")
@@ -429,8 +420,8 @@ def restart_supercronic():
 
     # 检查当前 PID 1
     try:
-        with open('/proc/1/cmdline', 'r') as f:
-            pid1_cmdline = f.read().replace('\x00', ' ').strip()
+        with open('/proc/1/cmdline', 'rb') as f:
+            pid1_cmdline = f.read().replace(b'\x00', b' ').decode('utf-8', errors='ignore').strip()
         print(f"  🔍 当前 PID 1: {pid1_cmdline}")
 
         if "supercronic" in pid1_cmdline.lower():
@@ -446,6 +437,97 @@ def restart_supercronic():
         print("  💡 建议重启容器: docker restart trendradar")
 
 
+def _read_proc_cmdline(pid: int) -> str:
+    """读取进程 cmdline，失败时返回空字符串。"""
+    proc_cmdline = Path(f"/proc/{pid}/cmdline")
+    if not proc_cmdline.exists():
+        return ""
+    try:
+        with open(proc_cmdline, "rb") as f:
+            return f.read().replace(b"\x00", b" ").decode("utf-8", errors="ignore").strip()
+    except Exception:
+        return ""
+
+
+def _is_expected_webserver_process(pid: int) -> bool:
+    """检查 pid 是否是当前端口的 http.server 进程。"""
+    cmdline = _read_proc_cmdline(pid)
+    if not cmdline:
+        return False
+    return "http.server" in cmdline and str(WEBSERVER_PORT) in cmdline
+
+
+def _terminate_webserver_process(pid: int, require_expected: bool = True) -> bool:
+    """尝试终止 Web 服务器进程。
+
+    require_expected=True 时，仅终止确认是 http.server 的进程，避免误杀。
+    """
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return True
+
+    if require_expected and not _is_expected_webserver_process(pid):
+        print(f"  ⚠️ PID {pid} 存在但并非 Web 服务器进程，跳过终止")
+        return False
+
+    try:
+        os.kill(pid, signal.SIGTERM)
+        time.sleep(0.5)
+        try:
+            os.kill(pid, 0)
+            os.kill(pid, signal.SIGKILL)
+            print(f"  ⚠️ 强制停止 Web 服务器 (PID: {pid})")
+        except OSError:
+            print(f"  ✅ Web 服务器已停止 (PID: {pid})")
+        return True
+    except OSError:
+        return True
+
+
+def _is_webserver_running(pid: int) -> bool:
+    """检查 Web 服务器进程是否真正在运行。"""
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+
+    if not _is_expected_webserver_process(pid):
+        return False
+
+    try:
+        import urllib.request
+        class _NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                raise urllib.error.HTTPError(req.full_url, code, msg, headers, fp)
+        opener = urllib.request.build_opener(_NoRedirect)
+        req = urllib.request.Request(f"http://127.0.0.1:{WEBSERVER_PORT}/", method="HEAD")
+        opener.open(req, timeout=3)
+        return True
+    except Exception:
+        try:
+            time.sleep(1)
+            opener.open(req, timeout=3)
+            return True
+        except Exception:
+            return False
+
+
+def _cleanup_stale_pid():
+    """清理失效的 PID 文件"""
+    if not Path(WEBSERVER_PID_FILE).exists():
+        return False
+
+    try:
+        with open(WEBSERVER_PID_FILE, 'r') as f:
+            old_pid = int(f.read().strip())
+        os.remove(WEBSERVER_PID_FILE)
+        print(f"  🧹 清理失效 PID 文件 (PID: {old_pid})")
+        return True
+    except Exception:
+        return False
+
+
 def start_webserver():
     """启动 Web 服务器托管 output 目录"""
     print(f"🌐 启动 Web 服务器 (端口: {WEBSERVER_PORT})...")
@@ -456,21 +538,22 @@ def start_webserver():
         try:
             with open(WEBSERVER_PID_FILE, 'r') as f:
                 old_pid = int(f.read().strip())
-            try:
-                os.kill(old_pid, 0)  # 检查进程是否存在
+
+            # 使用增强的进程检查
+            if _is_webserver_running(old_pid):
                 print(f"  ⚠️ Web 服务器已在运行 (PID: {old_pid})")
                 print(f"  💡 访问: http://localhost:{WEBSERVER_PORT}")
                 print("  💡 停止服务: python manage.py stop_webserver")
                 return
-            except OSError:
-                # 进程不存在，删除旧的 PID 文件
-                os.remove(WEBSERVER_PID_FILE)
+
+            # 进程异常时优先尝试终止旧进程，避免端口占用导致重启失败
+            _terminate_webserver_process(old_pid, require_expected=True)
+            _cleanup_stale_pid()
+            print(f"  ℹ️ 检测到失效的 PID 文件，已清理")
+
         except Exception as e:
             print(f"  ⚠️ 清理旧的 PID 文件: {e}")
-            try:
-                os.remove(WEBSERVER_PID_FILE)
-            except:
-                pass
+            _cleanup_stale_pid()
 
     # 检查目录是否存在
     if not Path(WEBSERVER_DIR).exists():
@@ -497,7 +580,6 @@ def start_webserver():
             # 保存 PID
             with open(WEBSERVER_PID_FILE, 'w') as f:
                 f.write(str(process.pid))
-
             print(f"  ✅ Web 服务器已启动 (PID: {process.pid})")
             print(f"  📁 服务目录: {WEBSERVER_DIR} (只读，仅静态文件)")
             print(f"  🌐 访问地址: http://localhost:{WEBSERVER_PORT}")
@@ -520,34 +602,15 @@ def stop_webserver():
     try:
         with open(WEBSERVER_PID_FILE, 'r') as f:
             pid = int(f.read().strip())
-
-        try:
-            # 尝试终止进程
-            os.kill(pid, signal.SIGTERM)
-            time.sleep(0.5)
-
-            # 检查进程是否已终止
-            try:
-                os.kill(pid, 0)
-                # 进程还在，强制杀死
-                os.kill(pid, signal.SIGKILL)
-                print(f"  ⚠️ 强制停止 Web 服务器 (PID: {pid})")
-            except OSError:
-                print(f"  ✅ Web 服务器已停止 (PID: {pid})")
-        except OSError as e:
-            if e.errno == 3:  # No such process
-                print(f"  ℹ️ 进程已不存在 (PID: {pid})")
-            else:
-                raise
-
-        # 删除 PID 文件
-        os.remove(WEBSERVER_PID_FILE)
+        _terminate_webserver_process(pid, require_expected=True)
+        if Path(WEBSERVER_PID_FILE).exists():
+            os.remove(WEBSERVER_PID_FILE)
     except Exception as e:
         print(f"  ❌ 停止失败: {e}")
         # 尝试清理 PID 文件
         try:
             os.remove(WEBSERVER_PID_FILE)
-        except:
+        except Exception:
             pass
 
 
@@ -564,16 +627,16 @@ def webserver_status():
         with open(WEBSERVER_PID_FILE, 'r') as f:
             pid = int(f.read().strip())
 
-        try:
-            os.kill(pid, 0)  # 检查进程是否存在
+        # 使用增强的进程检查
+        if _is_webserver_running(pid):
             print(f"  ✅ 运行中 (PID: {pid})")
             print(f"  📁 服务目录: {WEBSERVER_DIR}")
             print(f"  🌐 访问地址: http://localhost:{WEBSERVER_PORT}")
             print(f"  📄 首页: http://localhost:{WEBSERVER_PORT}/index.html")
             print("  💡 停止服务: python manage.py stop_webserver")
-        except OSError:
-            print(f"  ⭕ 未运行 (PID 文件存在但进程不存在)")
-            os.remove(WEBSERVER_PID_FILE)
+        else:
+            print(f"  ⭕ 未运行 (PID 文件存在但进程不可用)")
+            _cleanup_stale_pid()
             print("  💡 启动服务: python manage.py start_webserver")
     except Exception as e:
         print(f"  ❌ 状态检查失败: {e}")

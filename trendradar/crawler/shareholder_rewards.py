@@ -201,6 +201,7 @@ class ShareholderRewardsFetcher:
             feed_id=self.config.id,
             feed_name=self.config.name,
             url=self._announcement_url(announcement),
+            guid=announcement_id,
             published_at=published_at,
             summary=summary,
             author="巨潮资讯",

@@ -9,4 +9,8 @@ from trendradar.crawler.shareholder_rewards import (
     ShareholderRewardsFetcher,
 )
 
-__all__ = ["DataFetcher", "ShareholderRewardsConfig", "ShareholderRewardsFetcher"]
+__all__ = [
+    "DataFetcher",
+    "ShareholderRewardsConfig",
+    "ShareholderRewardsFetcher",
+]

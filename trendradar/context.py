@@ -7,26 +7,27 @@
 
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from trendradar.utils.time import (
+    DEFAULT_TIMEZONE,
     get_configured_time,
     format_date_folder,
     format_time_filename,
     get_current_time_display,
     convert_time_for_display,
+    format_iso_time_friendly,
+    is_within_days,
 )
 from trendradar.core import (
     load_frequency_words,
     matches_word_groups,
-    save_titles_to_file,
     read_all_today_titles,
     detect_latest_new_titles,
-    is_first_crawl_today,
     count_word_frequency,
+    Scheduler,
 )
 from trendradar.report import (
-    clean_title,
     prepare_report_data,
     generate_html_report,
     render_html_content,
@@ -36,8 +37,10 @@ from trendradar.notification import (
     render_dingtalk_content,
     split_content_into_batches,
     NotificationDispatcher,
-    PushRecordManager,
 )
+from trendradar.ai import AITranslator
+from trendradar.ai.filter import AIFilterResult
+from trendradar.ai.filter_pipeline import AIFilterPipeline, _TagExtractionError
 from trendradar.storage import get_storage_manager
 
 
@@ -72,13 +75,14 @@ class AppContext:
         """
         self.config = config
         self._storage_manager = None
+        self._scheduler = None
 
     # === 配置访问 ===
 
     @property
     def timezone(self) -> str:
         """获取配置的时区"""
-        return self.config.get("TIMEZONE", "Asia/Shanghai")
+        return self.config.get("TIMEZONE", DEFAULT_TIMEZONE)
 
     @property
     def rank_threshold(self) -> int:
@@ -129,6 +133,37 @@ class AppContext:
     def display_mode(self) -> str:
         """获取显示模式 (keyword | platform)"""
         return self.config.get("DISPLAY_MODE", "keyword")
+
+    @property
+    def show_new_section(self) -> bool:
+        """是否显示新增热点区域"""
+        return self.config.get("DISPLAY", {}).get("REGIONS", {}).get("NEW_ITEMS", True)
+
+    @property
+    def region_order(self) -> List[str]:
+        """获取区域显示顺序"""
+        default_order = ["hotlist", "rss", "new_items", "standalone", "ai_analysis"]
+        return self.config.get("DISPLAY", {}).get("REGION_ORDER", default_order)
+
+    @property
+    def filter_method(self) -> str:
+        """获取筛选策略: keyword | ai"""
+        return self.config.get("FILTER", {}).get("METHOD", "keyword")
+
+    @property
+    def ai_priority_sort_enabled(self) -> bool:
+        """AI 模式标签排序开关（与 keyword 的 sort_by_position_first 解耦）"""
+        return self.config.get("FILTER", {}).get("PRIORITY_SORT_ENABLED", False)
+
+    @property
+    def ai_filter_config(self) -> Dict:
+        """获取 AI 筛选配置"""
+        return self.config.get("AI_FILTER", {})
+
+    @property
+    def ai_filter_enabled(self) -> bool:
+        """AI 筛选是否启用（基于 filter.method 判断）"""
+        return self.filter_method == "ai"
 
     # === 时间操作 ===
 
@@ -184,17 +219,12 @@ class AppContext:
         return self._storage_manager
 
     def get_output_path(self, subfolder: str, filename: str) -> str:
-        """获取输出路径"""
-        output_dir = Path("output") / self.format_date() / subfolder
+        """获取输出路径（扁平化结构：output/类型/日期/文件名）"""
+        output_dir = Path("output") / subfolder / self.format_date()
         output_dir.mkdir(parents=True, exist_ok=True)
         return str(output_dir / filename)
 
     # === 数据处理 ===
-
-    def save_titles(self, results: Dict, id_to_name: Dict, failed_ids: List) -> str:
-        """保存标题到文件"""
-        output_path = self.get_output_path("txt", f"{self.format_time()}.txt")
-        return save_titles_to_file(results, id_to_name, failed_ids, output_path, clean_title)
 
     def read_today_titles(
         self, platform_ids: Optional[List[str]] = None, quiet: bool = False
@@ -272,6 +302,7 @@ class AppContext:
         new_titles: Optional[Dict] = None,
         id_to_name: Optional[Dict] = None,
         mode: str = "daily",
+        frequency_file: Optional[str] = None,
     ) -> Dict:
         """准备报告数据"""
         return prepare_report_data(
@@ -281,8 +312,7 @@ class AppContext:
             id_to_name=id_to_name,
             mode=mode,
             rank_threshold=self.rank_threshold,
-            matches_word_groups_func=self.matches_word_groups,
-            load_frequency_words_func=self.load_frequency_words,
+            show_new_section=self.show_new_section,
         )
 
     def generate_html(
@@ -293,10 +323,14 @@ class AppContext:
         new_titles: Optional[Dict] = None,
         id_to_name: Optional[Dict] = None,
         mode: str = "daily",
-        is_daily_summary: bool = False,
         update_info: Optional[Dict] = None,
         rss_items: Optional[List[Dict]] = None,
         rss_new_items: Optional[List[Dict]] = None,
+        ai_analysis: Optional[Any] = None,
+        standalone_data: Optional[Dict] = None,
+        frequency_file: Optional[str] = None,
+        report_metadata: Optional[Dict] = None,
+        translate_report_func: Optional[Any] = None,
     ) -> str:
         """生成HTML报告"""
         return generate_html_report(
@@ -306,40 +340,41 @@ class AppContext:
             new_titles=new_titles,
             id_to_name=id_to_name,
             mode=mode,
-            is_daily_summary=is_daily_summary,
             update_info=update_info,
             rank_threshold=self.rank_threshold,
             output_dir="output",
             date_folder=self.format_date(),
             time_filename=self.format_time(),
-            render_html_func=lambda *args, **kwargs: self.render_html(*args, rss_items=rss_items, rss_new_items=rss_new_items, **kwargs),
-            matches_word_groups_func=self.matches_word_groups,
-            load_frequency_words_func=self.load_frequency_words,
-            enable_index_copy=True,
+            render_html_func=lambda *args, **kwargs: self.render_html(*args, rss_items=rss_items, rss_new_items=rss_new_items, ai_analysis=ai_analysis, standalone_data=standalone_data, **kwargs),
+            report_metadata=report_metadata,
+            translate_report_func=translate_report_func,
         )
 
     def render_html(
         self,
         report_data: Dict,
         total_titles: int,
-        is_daily_summary: bool = False,
         mode: str = "daily",
         update_info: Optional[Dict] = None,
         rss_items: Optional[List[Dict]] = None,
         rss_new_items: Optional[List[Dict]] = None,
+        ai_analysis: Optional[Any] = None,
+        standalone_data: Optional[Dict] = None,
     ) -> str:
         """渲染HTML内容"""
         return render_html_content(
             report_data=report_data,
             total_titles=total_titles,
-            is_daily_summary=is_daily_summary,
             mode=mode,
             update_info=update_info,
-            reverse_content_order=self.config.get("REVERSE_CONTENT_ORDER", False),
+            region_order=self.region_order,
             get_time_func=self.get_time,
             rss_items=rss_items,
             rss_new_items=rss_new_items,
             display_mode=self.display_mode,
+            ai_analysis=ai_analysis,
+            show_new_section=self.show_new_section,
+            standalone_data=standalone_data,
         )
 
     # === 通知内容渲染 ===
@@ -356,8 +391,9 @@ class AppContext:
             update_info=update_info,
             mode=mode,
             separator=self.config.get("FEISHU_MESSAGE_SEPARATOR", "---"),
-            reverse_content_order=self.config.get("REVERSE_CONTENT_ORDER", False),
+            region_order=self.region_order,
             get_time_func=self.get_time,
+            show_new_section=self.show_new_section,
         )
 
     def render_dingtalk(
@@ -371,8 +407,9 @@ class AppContext:
             report_data=report_data,
             update_info=update_info,
             mode=mode,
-            reverse_content_order=self.config.get("REVERSE_CONTENT_ORDER", False),
+            region_order=self.region_order,
             get_time_func=self.get_time,
+            show_new_section=self.show_new_section,
         )
 
     def split_content(
@@ -384,8 +421,12 @@ class AppContext:
         mode: str = "daily",
         rss_items: Optional[list] = None,
         rss_new_items: Optional[list] = None,
+        ai_content: Optional[str] = None,
+        standalone_data: Optional[Dict] = None,
+        ai_stats: Optional[Dict] = None,
+        report_type: str = "热点分析报告",
     ) -> List[str]:
-        """分批处理消息内容（支持热榜+RSS合并）
+        """分批处理消息内容（支持热榜+RSS合并+AI分析+独立展示区）
 
         Args:
             report_data: 报告数据
@@ -395,6 +436,10 @@ class AppContext:
             mode: 报告模式
             rss_items: RSS 统计条目列表
             rss_new_items: RSS 新增条目列表
+            ai_content: AI 分析内容（已渲染的字符串）
+            standalone_data: 独立展示区数据
+            ai_stats: AI 分析统计数据
+            report_type: 报告类型
 
         Returns:
             分批后的消息内容列表
@@ -411,29 +456,85 @@ class AppContext:
                 "default": self.config.get("MESSAGE_BATCH_SIZE", 4000),
             },
             feishu_separator=self.config.get("FEISHU_MESSAGE_SEPARATOR", "---"),
-            reverse_content_order=self.config.get("REVERSE_CONTENT_ORDER", False),
+            region_order=self.region_order,
             get_time_func=self.get_time,
             rss_items=rss_items,
             rss_new_items=rss_new_items,
-            timezone=self.config.get("TIMEZONE", "Asia/Shanghai"),
+            timezone=self.config.get("TIMEZONE", DEFAULT_TIMEZONE),
             display_mode=self.display_mode,
+            ai_content=ai_content,
+            standalone_data=standalone_data,
+            rank_threshold=self.rank_threshold,
+            ai_stats=ai_stats,
+            report_type=report_type,
+            show_new_section=self.show_new_section,
         )
 
     # === 通知发送 ===
 
     def create_notification_dispatcher(self) -> NotificationDispatcher:
         """创建通知调度器"""
+        # 创建翻译器（如果启用）
+        translator = None
+        trans_config = self.config.get("AI_TRANSLATION", {})
+        if trans_config.get("ENABLED", False):
+            ai_config = self.config.get("AI", {})
+            translator = AITranslator(trans_config, ai_config)
+
         return NotificationDispatcher(
             config=self.config,
             get_time_func=self.get_time,
             split_content_func=self.split_content,
+            translator=translator,
         )
 
-    def create_push_manager(self) -> PushRecordManager:
-        """创建推送记录管理器"""
-        return PushRecordManager(
-            storage_backend=self.get_storage_manager(),
+    def create_scheduler(self) -> Scheduler:
+        """
+        创建调度器（延迟初始化，单例）
+
+        基于 config.yaml 的 schedule 段 + timeline.yaml 构建。
+        """
+        if self._scheduler is None:
+            schedule_config = self.config.get("SCHEDULE", {})
+            timeline_data = self.config.get("_TIMELINE_DATA", {})
+
+            self._scheduler = Scheduler(
+                schedule_config=schedule_config,
+                timeline_data=timeline_data,
+                storage_backend=self.get_storage_manager(),
+                get_time_func=self.get_time,
+                fallback_report_mode=self.config.get("REPORT_MODE", "current"),
+            )
+        return self._scheduler
+
+    # === AI 智能筛选 ===
+
+    def _get_ai_filter_pipeline(self) -> "AIFilterPipeline":
+        return AIFilterPipeline(
+            config=self.config,
+            storage_manager=self.get_storage_manager(),
             get_time_func=self.get_time,
+        )
+
+    def run_ai_filter(self, interests_file: Optional[str] = None) -> Optional[AIFilterResult]:
+        """执行 AI 智能筛选完整流程"""
+        if not self.ai_filter_enabled:
+            return None
+        try:
+            return self._get_ai_filter_pipeline().run(interests_file)
+        except _TagExtractionError:
+            return AIFilterResult(success=False, error="标签提取失败")
+
+    def convert_ai_filter_to_report_data(
+        self,
+        ai_filter_result: AIFilterResult,
+        mode: str = "daily",
+        new_titles: Optional[Dict] = None,
+        rss_new_urls: Optional[set] = None,
+    ) -> tuple:
+        """将 AI 筛选结果转换为与关键词匹配相同的数据结构"""
+        return self._get_ai_filter_pipeline().convert_to_report_data(
+            ai_filter_result, mode, new_titles, rss_new_urls,
         )
 
     # === 资源清理 ===

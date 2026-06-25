@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS rss_items (
     title TEXT NOT NULL,                      -- 标题
     feed_id TEXT NOT NULL,                    -- 所属 RSS 源
     url TEXT NOT NULL,                        -- 文章链接
+    guid TEXT DEFAULT '',                     -- GUID/ID（RSS guid 或 Atom id）
     published_at TEXT,                        -- RSS 发布时间（ISO 格式）
     summary TEXT,                             -- 摘要/描述
     author TEXT,                              -- 作者
@@ -65,12 +66,16 @@ CREATE TABLE IF NOT EXISTS rss_crawl_status (
 -- ============================================
 -- 推送记录表
 -- 用于 push_window once_per_day 功能
+-- 以及 ai_analysis analysis_window once_per_day 功能
 -- ============================================
 CREATE TABLE IF NOT EXISTS rss_push_records (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     date TEXT NOT NULL UNIQUE,                -- 日期（YYYY-MM-DD）
     pushed INTEGER DEFAULT 0,                 -- 是否已推送
     push_time TEXT,                           -- 推送时间
+    ai_analyzed INTEGER DEFAULT 0,            -- 是否已进行 AI 分析
+    ai_analysis_time TEXT,                    -- AI 分析时间
+    ai_analysis_mode TEXT,                    -- AI 分析模式
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -93,6 +98,10 @@ CREATE INDEX IF NOT EXISTS idx_rss_title ON rss_items(title);
 -- URL + feed_id 唯一索引（实现去重）
 CREATE UNIQUE INDEX IF NOT EXISTS idx_rss_url_feed
     ON rss_items(url, feed_id);
+
+-- GUID + feed_id 部分唯一索引（guid 非空时优先用 guid 去重）
+CREATE UNIQUE INDEX IF NOT EXISTS idx_rss_guid_feed
+    ON rss_items(guid, feed_id) WHERE guid != '';
 
 -- 抓取状态索引
 CREATE INDEX IF NOT EXISTS idx_rss_crawl_status_record ON rss_crawl_status(crawl_record_id);
