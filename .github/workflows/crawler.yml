@@ -4,7 +4,7 @@ on:
   schedule:
     # 原版时间锁已移除 / Time-lock removed from original fork
     # GitHub Actions cron uses UTC: 23:33 UTC = 07:33 Beijing time next day.
-    - cron: "32 23 * * *"
+    - cron: "44 01 * * *"
 
   workflow_dispatch:
 
